@@ -58,7 +58,7 @@ class Recorder:
         return pred
 
     def save(self, path):
-        extra = {"alphas": np.array(self.method.alphas)} if hasattr(self.method, "alphas") else {}
+        extra = {k: np.array(getattr(self.method, k)) for k in ("alphas", "resets") if hasattr(self.method, k)}
         np.savez_compressed(path, probs=np.concatenate(self.rows["probs"]).astype(np.float32),
                             drift=np.array(self.rows["drift"]), shift_src=np.array(self.rows["shift_src"]),
                             shift_prev=np.array(self.rows["shift_prev"]), **extra)

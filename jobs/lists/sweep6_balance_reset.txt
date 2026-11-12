@@ -1,0 +1,8 @@
+bn_mix|val test|{"alpha": 0.3, "balance": true}|../runs/sweep/bn_mix_a0.3_bal
+bn_mix|val test|{"alpha": 0.5, "balance": true}|../runs/sweep/bn_mix_a0.5_bal
+bn_mix|val test|{"alpha": 0.3, "balance": true, "post": "lame", "k": 5}|../runs/sweep/bn_mix_a0.3_bal_lame5
+bn_mix|val test|{"alpha": 0.5, "balance": true, "post": "lame", "k": 5}|../runs/sweep/bn_mix_a0.5_bal_lame5
+bn_mix|val test|{"alpha": 0.7, "balance": true, "post": "lame", "k": 5}|../runs/sweep/bn_mix_a0.7_bal_lame5
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "reset_k": 3}|../runs/sweep/rotta_stats_a0.5_uf_reset3
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "reset_k": 3, "post": "lame", "k": 5}|../runs/sweep/rotta_stats_a0.5_uf_reset3_lame5
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "reset_k": 6, "post": "lame", "k": 5}|../runs/sweep/rotta_stats_a0.5_uf_reset6_lame5

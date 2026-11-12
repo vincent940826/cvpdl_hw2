@@ -5,6 +5,7 @@ It may update its own state (BN statistics, parameters, memory, ...) as the stre
 """
 import copy
 import math
+import statistics
 
 import torch
 import torch.nn as nn
@@ -89,10 +90,16 @@ class BlendBN(nn.Module):
         self.bn, self.alpha, self.update = bn, alpha, update
         self.register_buffer("ref_mean", bn.running_mean.detach().clone())
         self.register_buffer("ref_var", bn.running_var.detach().clone())
+        self.weights = None  # optional per-sample weights for the batch stats (set by BNMix(balance=True))
 
     def forward(self, x):
         a = self.alpha
-        bmean, bvar = x.mean((0, 2, 3)), x.var((0, 2, 3), unbiased=False)
+        if self.weights is None:
+            bmean, bvar = x.mean((0, 2, 3)), x.var((0, 2, 3), unbiased=False)
+        else:
+            w = self.weights.view(-1, 1)
+            bmean = (x.mean((2, 3)) * w).sum(0)
+            bvar = (((x - bmean.view(1, -1, 1, 1)) ** 2).mean((2, 3)) * w).sum(0)
         # Channel-averaged symmetric KL between batch and reference stats (read by BNAuto)
         d2, v1, v2 = (bmean - self.ref_mean) ** 2, bvar + 1e-5, self.ref_var + 1e-5
         self.shift = (0.5 * ((v1 + d2) / v2 + (v2 + d2) / v1) - 1).mean()
@@ -144,22 +151,38 @@ class BNMix:
     """Fixed blend of source and current-batch BN stats (Schneider et al., 2020, prior strength).
 
     post: "none", "prior" (ROID prior correction) or "lame" (LAME on penultimate features, kNN size k).
+    balance=True (our addition): predict once, then recompute the batch stats with each image weighted by
+    1 / (number of images in the batch with its predicted class), so every predicted class counts equally, and
+    predict again. Targets the label bias of non-i.i.d. batch stats without using past batches.
     """
 
-    def __init__(self, model, alpha=0.3, post="none", k=5):
+    def __init__(self, model, alpha=0.3, post="none", k=5, balance=False):
         self.model = model.eval()
         replace_bn(self.model, lambda bn: BlendBN(bn, alpha, update=False))
-        self.post, self.k = post, k
+        self.bns = [m for m in self.model.modules() if isinstance(m, BlendBN)]
+        self.post, self.k, self.balance = post, k, balance
         if post == "lame":
             self.model.fc.register_forward_hook(lambda m, inp, out: setattr(self, "feats", inp[0]))
 
-    @torch.no_grad()
-    def __call__(self, x):
+    def predict(self, x):
         logits = self.model(x)
         if self.post == "prior":
             logits = prior_correction(logits)
         elif self.post == "lame":
             logits = lame(logits, self.feats, self.k)
+        return logits
+
+    @torch.no_grad()
+    def __call__(self, x):
+        logits = self.predict(x)
+        if self.balance:
+            cls = logits.argmax(1)
+            w = 1 / torch.bincount(cls, minlength=logits.shape[1]).float()[cls]
+            for m in self.bns:
+                m.weights = w / w.sum()
+            logits = self.predict(x)
+            for m in self.bns:
+                m.weights = None
         self.last_logits = logits
         return logits.argmax(1)
 
@@ -219,9 +242,17 @@ class RobustBN(nn.Module):
         self.register_buffer("var", bn.running_var.detach().clone())
         self.register_buffer("src_mean", bn.running_mean.detach().clone())
         self.register_buffer("src_var", bn.running_var.detach().clone())
+        self.watch, self.prev, self.dprev = False, None, None  # domain-shift watch (RoTTA reset_k, our addition)
 
     def forward(self, x):
         if not self.training:
+            if self.watch:  # symmetric KL between this batch's input stats and the previous batch's
+                bm, bv = x.mean((0, 2, 3)), x.var((0, 2, 3), unbiased=False) + 1e-5
+                if self.prev is not None:
+                    pm, pv = self.prev
+                    d2 = (bm - pm) ** 2
+                    self.dprev = (0.5 * ((bv + d2) / pv + (pv + d2) / bv) - 1).mean()
+                self.prev = (bm, bv)
             mean, var, b = self.mean, self.var, self.anchor  # anchor < 1: our addition, blend back toward source
             if b < 1:
                 mean, var = (1 - b) * self.src_mean + b * mean, (1 - b) * self.src_var + b * var
@@ -314,10 +345,12 @@ class RoTTA:
     Our switches: train=False keeps only the statistics part (no gradients); update_first=True adds the current batch
     to the memory and updates before predicting it (the paper predicts first); post="lame" applies LAME to the output;
     anchor < 1 predicts with (1 - anchor) * source stats + anchor * RBN stats.
+    reset_k (our addition): when the shallow-layer stats jump vs the previous batch by more than reset_k x the median
+    jump seen so far, empty the memory and let the next RBN update replace the stats fully (momentum 1).
     """
 
     def __init__(self, model, alpha=0.05, nu=0.001, lr=1e-3, capacity=64, lambda_t=1.0, lambda_u=1.0,
-                 train=True, update_first=False, post="none", k=5, anchor=1.0):
+                 train=True, update_first=False, post="none", k=5, anchor=1.0, reset_k=None):
         replace_bn(model, lambda bn: RobustBN(bn, alpha, anchor))
         model.requires_grad_(False)
         self.teacher = copy.deepcopy(model).eval()
@@ -333,6 +366,11 @@ class RoTTA:
             self.opt = torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999))
         self.mem = CSTU(capacity, 20, lambda_t, lambda_u)
         self.nu, self.update_first, self.post, self.k = nu, update_first, post, k
+        self.rbns = [m for net in (self.teacher, self.student) if net is not None
+                     for m in net.modules() if isinstance(m, RobustBN)]
+        t_rbns = [m for m in self.teacher.modules() if isinstance(m, RobustBN)]
+        self.watched = t_rbns[:len(t_rbns) // 3]  # shallow layers: corruption shows here, labels barely do
+        self.reset_k, self.hist, self.resets, self.nbatch, self.full_update = reset_k, [], [], 0, False
         if post == "lame":
             self.teacher.fc.register_forward_hook(lambda m, inp, out: setattr(self, "feats", inp[0]))
 
@@ -345,12 +383,30 @@ class RoTTA:
         for xi, c, e in zip(x, p.argmax(1).tolist(), ent.tolist()):
             self.mem.add(xi.clone(), c, e)
 
+    def check_shift(self):
+        ds = [m.dprev for m in self.watched if m.dprev is not None]
+        if ds:
+            d = torch.stack(ds).mean().item()
+            if len(self.hist) >= 3 and d > self.reset_k * statistics.median(self.hist):
+                self.mem.data = [[] for _ in range(self.mem.C)]
+                self.full_update = True
+                self.resets.append(self.nbatch)
+            self.hist.append(d)
+        self.nbatch += 1
+
     def update(self):
         xm, age = self.mem.get()
+        if self.full_update:
+            for m in self.rbns:
+                m.momentum_saved, m.momentum = m.momentum, 1.0
         self.teacher.train()
         with torch.no_grad():
             t_out = self.teacher(xm)  # also EMA-updates the teacher's RBN stats with the memory's stats
         self.teacher.eval()
+        if self.full_update and self.student is None:
+            for m in self.rbns:
+                m.momentum = m.momentum_saved
+            self.full_update = False
         if self.student is None:
             return
         self.student.train()
@@ -363,10 +419,20 @@ class RoTTA:
         with torch.no_grad():
             for tp, sp in zip(self.teacher.parameters(), self.student.parameters()):
                 tp.mul_(1 - self.nu).add_(sp.detach(), alpha=self.nu)
+        if self.full_update:
+            for m in self.rbns:
+                m.momentum = m.momentum_saved
+            self.full_update = False
 
     def __call__(self, x):
+        for m in self.watched:
+            m.watch = self.reset_k is not None
         with torch.no_grad():
             logits = self.teacher(x)
+        for m in self.watched:
+            m.watch = False
+        if self.reset_k is not None:
+            self.check_shift()
         if not self.update_first:
             out = self.finish(logits)  # before update(): LAME needs this forward's features
         self.remember(x, logits)
