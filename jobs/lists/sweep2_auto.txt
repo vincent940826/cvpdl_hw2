@@ -1,0 +1,7 @@
+bn_auto|val|{"a_max": 0.3, "d0": 1e-9}|../runs/sweep/bn_auto_sanity
+bn_auto|val test|{"a_max": 0.3, "d0": 0.5}|../runs/sweep/bn_auto_a0.3_d0.5
+bn_auto|val test|{"a_max": 0.3, "d0": 1.0}|../runs/sweep/bn_auto_a0.3_d1.0
+bn_auto|val test|{"a_max": 0.3, "d0": 2.0}|../runs/sweep/bn_auto_a0.3_d2.0
+bn_auto|val test|{"a_max": 0.4, "d0": 0.5}|../runs/sweep/bn_auto_a0.4_d0.5
+bn_auto|val test|{"a_max": 0.4, "d0": 1.0}|../runs/sweep/bn_auto_a0.4_d1.0
+bn_auto|val test|{"a_max": 0.4, "d0": 2.0}|../runs/sweep/bn_auto_a0.4_d2.0

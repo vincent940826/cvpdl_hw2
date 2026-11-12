@@ -1,0 +1,6 @@
+bn_mix|val test|{"alpha": 0.3, "post": "prior"}|../runs/sweep/bn_mix_a0.3_prior
+bn_mix|val test|{"alpha": 0.3, "post": "lame", "k": 5}|../runs/sweep/bn_mix_a0.3_lame5
+bn_mix|val test|{"alpha": 0.2, "post": "prior"}|../runs/sweep/bn_mix_a0.2_prior
+bn_mix|val test|{"alpha": 0.2, "post": "lame", "k": 5}|../runs/sweep/bn_mix_a0.2_lame5
+bn_mix|val test|{"alpha": 0.3, "post": "lame", "k": 3}|../runs/sweep/bn_mix_a0.3_lame3
+bn_mix|val test|{"alpha": 0.3, "post": "lame", "k": 10}|../runs/sweep/bn_mix_a0.3_lame10
