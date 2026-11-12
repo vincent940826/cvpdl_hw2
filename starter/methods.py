@@ -3,9 +3,15 @@
 A method is a callable: method(x) -> LongTensor of labels in {0..19} for the normalized batch x.
 It may update its own state (BN statistics, parameters, memory, ...) as the stream goes on.
 """
+import copy
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)  # same normalization as harness.py
+STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
 class Source:
@@ -202,4 +208,175 @@ class BNAuto:
         return self.last_logits.argmax(1)
 
 
-METHODS = {"source": Source, "bn_adapt": BNAdapt, "tent": Tent, "bn_mix": BNMix, "bn_ema": BNEma, "bn_auto": BNAuto}
+class RobustBN(nn.Module):
+    """RoTTA's robust BN (RBN): normalize with global stats; in train mode, first EMA-update them with the input's
+    stats (the input is the memory bank, not the test batch)."""
+
+    def __init__(self, bn, momentum, anchor=1.0):
+        super().__init__()
+        self.bn, self.momentum, self.anchor = bn, momentum, anchor
+        self.register_buffer("mean", bn.running_mean.detach().clone())
+        self.register_buffer("var", bn.running_var.detach().clone())
+        self.register_buffer("src_mean", bn.running_mean.detach().clone())
+        self.register_buffer("src_var", bn.running_var.detach().clone())
+
+    def forward(self, x):
+        if not self.training:
+            mean, var, b = self.mean, self.var, self.anchor  # anchor < 1: our addition, blend back toward source
+            if b < 1:
+                mean, var = (1 - b) * self.src_mean + b * mean, (1 - b) * self.src_var + b * var
+            return F.batch_norm(x, mean, var, self.bn.weight, self.bn.bias, False, 0.0, self.bn.eps)
+        m = self.momentum
+        mean = (1 - m) * self.mean + m * x.mean((0, 2, 3))
+        var = (1 - m) * self.var + m * x.var((0, 2, 3), unbiased=False)
+        self.mean, self.var = mean.detach(), var.detach()
+        # Normalize by hand: cuDNN's batch_norm rejects stats that carry gradients (as in the official RBN)
+        x = (x - mean.view(1, -1, 1, 1)) / torch.sqrt(var.view(1, -1, 1, 1) + self.bn.eps)
+        return x * self.bn.weight.view(1, -1, 1, 1) + self.bn.bias.view(1, -1, 1, 1)
+
+
+class CSTU:
+    """RoTTA's category-balanced memory: slots are split across predicted classes; when full, the oldest and most
+    uncertain sample (score = lambda_t * sigmoid(age / capacity) + lambda_u * entropy / log C) is evicted first."""
+
+    def __init__(self, capacity=64, num_class=20, lambda_t=1.0, lambda_u=1.0):
+        self.cap, self.C, self.per_class = capacity, num_class, capacity / num_class
+        self.lt, self.lu = lambda_t, lambda_u
+        self.data = [[] for _ in range(num_class)]  # items: [image, entropy, birth time]
+        self.t = 0  # one tick per added sample, so age = t - birth
+
+    def score(self, item):
+        return self.lt / (1 + math.exp(-(self.t - item[2]) / self.cap)) + self.lu * item[1] / math.log(self.C)
+
+    def add(self, x, cls, ent):
+        new = [x, ent, self.t]
+        if self.make_room(cls, self.score(new)):
+            self.data[cls].append(new)
+        self.t += 1
+
+    def make_room(self, cls, new_score):
+        occ = [len(items) for items in self.data]
+        if occ[cls] < self.per_class:
+            if sum(occ) < self.cap:
+                return True
+            classes = [c for c in range(self.C) if occ[c] == max(occ)]  # evict from the majority classes
+        else:
+            classes = [cls]
+        worst = None
+        for c in classes:
+            for i, item in enumerate(self.data[c]):
+                s = self.score(item)
+                if worst is None or s >= worst[0]:
+                    worst = (s, c, i)
+        if worst is None:
+            return True
+        if worst[0] > new_score:
+            self.data[worst[1]].pop(worst[2])
+            return True
+        return False
+
+    def get(self):
+        items = [item for c in self.data for item in c]
+        x = torch.stack([item[0] for item in items])
+        age = torch.tensor([(self.t - item[2]) / self.cap for item in items], device=x.device)
+        return x, age
+
+
+def strong_aug(x):
+    """CoTTA-style strong augmentation on a normalized GPU batch: random affine (rotation +-15 deg, translate +-1/16,
+    scale 0.9-1.1) with horizontal flip, brightness / contrast / saturation jitter, small Gaussian noise."""
+    n, dev = len(x), x.device
+    mean, std = MEAN.to(dev), STD.to(dev)
+    img = x * std + mean
+    u = lambda lo, hi: torch.rand(n, device=dev) * (hi - lo) + lo  # noqa: E731
+    ang, sc = u(-15, 15) * math.pi / 180, u(0.9, 1.1)
+    flip = torch.where(torch.rand(n, device=dev) < 0.5, -1.0, 1.0)
+    cos, sin = torch.cos(ang) / sc, torch.sin(ang) / sc
+    theta = torch.stack([torch.stack([cos * flip, -sin, u(-1 / 8, 1 / 8)], 1),
+                         torch.stack([sin * flip, cos, u(-1 / 8, 1 / 8)], 1)], 1)
+    img = F.grid_sample(img, F.affine_grid(theta, list(img.shape), align_corners=False),
+                        padding_mode="reflection", align_corners=False)
+    lum = torch.tensor([0.299, 0.587, 0.114], device=dev).view(1, 3, 1, 1)
+    img = img * u(0.6, 1.4).view(n, 1, 1, 1)
+    m = (img * lum).sum(1, keepdim=True).mean((2, 3), keepdim=True)
+    img = (img - m) * u(0.7, 1.3).view(n, 1, 1, 1) + m
+    g = (img * lum).sum(1, keepdim=True)
+    img = (img - g) * u(0.5, 1.5).view(n, 1, 1, 1) + g
+    img = (img + 0.005 * torch.randn_like(img)).clamp(0, 1)
+    return (img - mean) / std
+
+
+class RoTTA:
+    """RoTTA (Yuan et al., CVPR 2023): RBN + category-balanced memory (CSTU) + teacher-student training on the memory.
+
+    Defaults follow the paper: alpha (RBN momentum) 0.05, nu (teacher EMA) 0.001, Adam lr 1e-3, memory 64,
+    lambda_t = lambda_u = 1, BN affine params trained, timeliness-weighted loss, prediction from the teacher.
+    Our switches: train=False keeps only the statistics part (no gradients); update_first=True adds the current batch
+    to the memory and updates before predicting it (the paper predicts first); post="lame" applies LAME to the output;
+    anchor < 1 predicts with (1 - anchor) * source stats + anchor * RBN stats.
+    """
+
+    def __init__(self, model, alpha=0.05, nu=0.001, lr=1e-3, capacity=64, lambda_t=1.0, lambda_u=1.0,
+                 train=True, update_first=False, post="none", k=5, anchor=1.0):
+        replace_bn(model, lambda bn: RobustBN(bn, alpha, anchor))
+        model.requires_grad_(False)
+        self.teacher = copy.deepcopy(model).eval()
+        self.model = self.teacher  # what run.py --diag inspects
+        self.student = None
+        if train:
+            self.student = model
+            params = []
+            for m in self.student.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.requires_grad_(True)
+                    params += [m.weight, m.bias]
+            self.opt = torch.optim.Adam(params, lr=lr, betas=(0.9, 0.999))
+        self.mem = CSTU(capacity, 20, lambda_t, lambda_u)
+        self.nu, self.update_first, self.post, self.k = nu, update_first, post, k
+        if post == "lame":
+            self.teacher.fc.register_forward_hook(lambda m, inp, out: setattr(self, "feats", inp[0]))
+
+    def finish(self, logits):
+        return lame(logits, self.feats, self.k) if self.post == "lame" else logits
+
+    def remember(self, x, logits):
+        p = logits.softmax(1)
+        ent = -(p * (p + 1e-6).log()).sum(1)
+        for xi, c, e in zip(x, p.argmax(1).tolist(), ent.tolist()):
+            self.mem.add(xi.clone(), c, e)
+
+    def update(self):
+        xm, age = self.mem.get()
+        self.teacher.train()
+        with torch.no_grad():
+            t_out = self.teacher(xm)  # also EMA-updates the teacher's RBN stats with the memory's stats
+        self.teacher.eval()
+        if self.student is None:
+            return
+        self.student.train()
+        s_out = self.student(strong_aug(xm))
+        w = torch.exp(-age) / (1 + torch.exp(-age))  # timeliness: newer samples weigh more
+        loss = (-(t_out.softmax(1) * s_out.log_softmax(1)).sum(1) * w).mean()
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
+        with torch.no_grad():
+            for tp, sp in zip(self.teacher.parameters(), self.student.parameters()):
+                tp.mul_(1 - self.nu).add_(sp.detach(), alpha=self.nu)
+
+    def __call__(self, x):
+        with torch.no_grad():
+            logits = self.teacher(x)
+        if not self.update_first:
+            out = self.finish(logits)  # before update(): LAME needs this forward's features
+        self.remember(x, logits)
+        self.update()
+        if self.update_first:
+            with torch.no_grad():
+                out = self.finish(self.teacher(x))
+        self.last_logits = out
+        return out.argmax(1)
+
+
+METHODS = {"source": Source, "bn_adapt": BNAdapt, "tent": Tent, "bn_mix": BNMix, "bn_ema": BNEma, "bn_auto": BNAuto,
+           "rotta": RoTTA}

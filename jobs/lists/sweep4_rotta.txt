@@ -1,0 +1,11 @@
+rotta|val|{"alpha": 0, "train": false}|../runs/sweep/rotta_sanity
+rotta|val test|{}|../runs/sweep/rotta_paper
+rotta|val test|{"train": false}|../runs/sweep/rotta_stats_a0.05
+rotta|val test|{"alpha": 0.2, "train": false}|../runs/sweep/rotta_stats_a0.2
+rotta|val test|{"alpha": 0.5, "train": false}|../runs/sweep/rotta_stats_a0.5
+rotta|val test|{"alpha": 0.2, "train": false, "update_first": true}|../runs/sweep/rotta_stats_a0.2_uf
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true}|../runs/sweep/rotta_stats_a0.5_uf
+rotta|val test|{"alpha": 0.2, "update_first": true}|../runs/sweep/rotta_full_a0.2_uf
+rotta|val test|{"alpha": 0.5, "update_first": true}|../runs/sweep/rotta_full_a0.5_uf
+rotta|val test|{"alpha": 0.2, "update_first": true, "post": "lame", "k": 5}|../runs/sweep/rotta_full_a0.2_uf_lame5
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "post": "lame", "k": 5}|../runs/sweep/rotta_stats_a0.5_uf_lame5

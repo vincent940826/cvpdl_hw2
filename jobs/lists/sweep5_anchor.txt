@@ -1,0 +1,7 @@
+rotta|val test|{}|../runs/sweep/rotta_paper
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "anchor": 0.3}|../runs/sweep/rotta_stats_a0.5_uf_anc0.3
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "anchor": 0.3, "post": "lame", "k": 5}|../runs/sweep/rotta_stats_a0.5_uf_anc0.3_lame5
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "anchor": 0.5}|../runs/sweep/rotta_stats_a0.5_uf_anc0.5
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "anchor": 0.5, "post": "lame", "k": 5}|../runs/sweep/rotta_stats_a0.5_uf_anc0.5_lame5
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "anchor": 0.7}|../runs/sweep/rotta_stats_a0.5_uf_anc0.7
+rotta|val test|{"alpha": 0.5, "train": false, "update_first": true, "anchor": 0.7, "post": "lame", "k": 5}|../runs/sweep/rotta_stats_a0.5_uf_anc0.7_lame5
