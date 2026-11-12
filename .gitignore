@@ -1,0 +1,9 @@
+data/
+*.pth
+*.zip
+out/
+runs/
+logs/
+scratch/
+__pycache__/
+CLAUDE.md
