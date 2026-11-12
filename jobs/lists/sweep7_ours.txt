@@ -1,0 +1,8 @@
+ours|val test|{}|../runs/sweep/ours_base
+ours|val test|{"views": ["id", "flip"]}|../runs/sweep/ours_flip
+ours|val test|{"views": ["id", "zoom0.8"]}|../runs/sweep/ours_zoom0.8
+ours|val test|{"views": ["id", "zoom0.7"]}|../runs/sweep/ours_zoom0.7
+ours|val test|{"views": ["id", "flip", "zoom0.8", "zoom0.8flip"]}|../runs/sweep/ours_flip_zoom0.8
+ours|val test|{"hist": 1}|../runs/sweep/ours_hist1
+ours|val test|{"hist": 2}|../runs/sweep/ours_hist2
+ours|val test|{"hist": 1, "views": ["id", "flip", "zoom0.8", "zoom0.8flip"]}|../runs/sweep/ours_hist1_flip_zoom0.8

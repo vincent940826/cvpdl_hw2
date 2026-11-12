@@ -1,0 +1,6 @@
+ours|val test|{"lr": 0.001}|../runs/sweep/ours_lr1e-3
+ours|val test|{"lr": 0.01}|../runs/sweep/ours_lr1e-2
+ours|val test|{"lr": 0.01, "conf": 0.5}|../runs/sweep/ours_lr1e-2_c0.5
+ours|val test|{"lr": 0.01, "conf": 0.5, "wens": 0.99}|../runs/sweep/ours_lr1e-2_c0.5_w0.99
+ours|val test|{"lr": 0.03, "conf": 0.5, "wens": 0.99}|../runs/sweep/ours_lr3e-2_c0.5_w0.99
+ours|val test|{"lr": 0.01, "conf": 0.5, "wens": 0.9}|../runs/sweep/ours_lr1e-2_c0.5_w0.9

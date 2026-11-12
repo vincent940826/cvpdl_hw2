@@ -107,6 +107,9 @@ class BlendBN(nn.Module):
         var = (1 - a) * self.ref_var + a * bvar
         if self.update:
             self.ref_mean, self.ref_var = mean.detach(), var.detach()
+        if torch.is_grad_enabled():  # cuDNN's batch_norm rejects stats that carry gradients
+            x = (x - mean.view(1, -1, 1, 1)) / torch.sqrt(var.view(1, -1, 1, 1) + self.bn.eps)
+            return x * self.bn.weight.view(1, -1, 1, 1) + self.bn.bias.view(1, -1, 1, 1)
         return F.batch_norm(x, mean, var, self.bn.weight, self.bn.bias, False, 0.0, self.bn.eps)
 
 
@@ -444,5 +447,122 @@ class RoTTA:
         return out.argmax(1)
 
 
+def view(x, name):
+    """Test-time view of a normalized batch: "id", "flip" (horizontal), "zoomS" (center crop of S x size, resized
+    back), "zoomSflip". Flips keep per-channel stats identical; zooms change them."""
+    if name.endswith("flip"):
+        x, name = x.flip(3), name[:-4] or "id"
+    if name.startswith("zoom"):
+        s = float(name[4:])
+        h, w = x.shape[2:]
+        ch, cw = round(h * s), round(w * s)
+        t, l = (h - ch) // 2, (w - cw) // 2
+        x = F.interpolate(x[:, :, t:t + ch, l:l + cw], size=(h, w), mode="bilinear", align_corners=False,
+                          antialias=True)
+    return x
+
+
+def lame_hist(logits, feats, hist, k=5, steps=100):
+    """LAME whose kNN graph also contains the previous batches' (features, final assignments) as fixed nodes."""
+    if not hist:
+        return lame(logits, feats, k, steps)
+    f = F.normalize(feats.float(), dim=1)
+    fh = torch.cat([h[0] for h in hist])
+    zh = torch.cat([h[1] for h in hist])
+    n = len(f)
+    sim = f @ torch.cat([f, fh]).T
+    sim[torch.arange(n), torch.arange(n)] = -2  # no self loops
+    knn = sim.topk(k, dim=1).indices
+    w = torch.zeros(n, n + len(fh), device=f.device).scatter_(1, knn, 1.0)
+    unary = logits.float().log_softmax(1)
+    z = unary.softmax(1)
+    for _ in range(steps):
+        z = (unary + w @ torch.cat([z, zh])).softmax(1)
+    return z.clamp_min(1e-12).log()
+
+
+class Ours:
+    """bn_mix + class-balanced batch stats + LAME, with switches for further ideas (our method).
+
+    alpha: weight of the (class-balanced) batch stats vs source stats. balance: reweight batch stats by
+    1 / in-batch count of the pass-1 predicted class. k: LAME kNN size (0 = off). views: list of test-time views
+    averaged in pass 2 (pass 1 uses the identity view only). hist: number of previous batches whose features and
+    final assignments join the LAME graph as fixed nodes.
+    lr > 0: after predicting, one SGD step (momentum 0.9) on the BN affine params, cross-entropy of the identity
+    view's output against the final (LAME) assignment, using only images whose assignment confidence >= conf
+    (as in EATA / SAR filtering); wens < 1 then pulls the params back toward source, p <- wens*p + (1-wens)*p0
+    (ROID's weight ensembling).
+    """
+
+    def __init__(self, model, alpha=0.3, balance=True, k=5, views=("id",), hist=0, lr=0.0, conf=0.0, wens=1.0):
+        self.model = model.eval()
+        replace_bn(self.model, lambda bn: BlendBN(bn, alpha, update=False))
+        self.bns = [m for m in self.model.modules() if isinstance(m, BlendBN)]
+        self.balance, self.k, self.views, self.nhist = balance, k, list(views), hist
+        self.hist = []
+        self.model.fc.register_forward_hook(lambda m, inp, out: setattr(self, "feats", inp[0]))
+        self.lr, self.conf, self.wens = lr, conf, wens
+        if lr > 0:
+            self.model.requires_grad_(False)
+            self.params = []
+            for m in self.model.modules():
+                if isinstance(m, nn.BatchNorm2d):
+                    m.requires_grad_(True)
+                    self.params += [m.weight, m.bias]
+            self.params0 = [p.detach().clone() for p in self.params]
+            self.opt = torch.optim.SGD(self.params, lr=lr, momentum=0.9)
+
+    def run_views(self, x, views, grad=False):
+        probs, feats, train_logits = 0, 0, None
+        for v in views:
+            with torch.set_grad_enabled(grad and v == "id"):
+                logits = self.model(view(x, v))
+            if logits.requires_grad:
+                train_logits = logits
+            probs = probs + logits.detach().softmax(1)
+            feats = feats + self.feats.detach()
+        return (probs / len(views)).clamp_min(1e-12).log(), feats / len(views), train_logits
+
+    def learn(self, logits, target):
+        p = target.exp()
+        keep = p.max(1).values >= self.conf
+        if keep.any():
+            loss = -(p[keep] * logits[keep].log_softmax(1)).sum(1).mean()
+            self.opt.zero_grad()
+            loss.backward()
+            self.opt.step()
+        if self.wens < 1:
+            with torch.no_grad():
+                for q, q0 in zip(self.params, self.params0):
+                    q.mul_(self.wens).add_(q0, alpha=1 - self.wens)
+
+    def finish(self, logp, feats, use_hist):
+        if not self.k:
+            return logp
+        return lame_hist(logp, feats, self.hist if use_hist else [], self.k)
+
+    @torch.no_grad()
+    def __call__(self, x):
+        train = self.lr > 0
+        logp, feats, tl = self.run_views(x, ["id"] if self.balance else self.views, grad=train and not self.balance)
+        out = self.finish(logp, feats, use_hist=not self.balance)
+        if self.balance:
+            cls = out.argmax(1)
+            w = 1 / torch.bincount(cls, minlength=out.shape[1]).float()[cls]
+            for m in self.bns:
+                m.weights = w / w.sum()
+            logp, feats, tl = self.run_views(x, self.views, grad=train)
+            for m in self.bns:
+                m.weights = None
+            out = self.finish(logp, feats, use_hist=True)
+        if train and tl is not None:
+            with torch.enable_grad():
+                self.learn(tl, out)
+        if self.nhist:
+            self.hist = (self.hist + [(F.normalize(feats.float(), dim=1), out.exp())])[-self.nhist:]
+        self.last_logits = out
+        return out.argmax(1)
+
+
 METHODS = {"source": Source, "bn_adapt": BNAdapt, "tent": Tent, "bn_mix": BNMix, "bn_ema": BNEma, "bn_auto": BNAuto,
-           "rotta": RoTTA}
+           "rotta": RoTTA, "ours": Ours}

@@ -1,0 +1,5 @@
+ours|val test|{"lr": 0.01, "conf": 0.5, "wens": 0.99}|../runs/sweep/ours_lr1e-2_c0.5_w0.99
+ours|val test|{"lr": 0.01, "wens": 0.9}|../runs/sweep/ours_lr1e-2_w0.9
+ours|val test|{"lr": 0.03, "wens": 0.99}|../runs/sweep/ours_lr3e-2_w0.99
+ours|val test|{"lr": 0.01, "views": ["id", "zoom0.7"]}|../runs/sweep/ours_lr1e-2_zoom0.7
+ours|val test|{"lr": 0.01, "wens": 0.99, "views": ["id", "zoom0.7"]}|../runs/sweep/ours_lr1e-2_w0.99_zoom0.7
