@@ -4,6 +4,7 @@
   python run.py --method source --split test     # writes out/test_pred.csv for Kaggle
 """
 import argparse
+import json
 import random
 
 import numpy as np
@@ -30,9 +31,10 @@ def main():
     ap.add_argument("--out", default="out")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--diag", action="store_true", help="also save per-batch diagnostics (analysis runs only)")
+    ap.add_argument("--cfg", default="{}", help='method hyperparameters as JSON, e.g. \'{"alpha": 0.3}\'')
     args = ap.parse_args()
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
-    method = METHODS[args.method](load_model(args.ckpt))
+    method = METHODS[args.method](load_model(args.ckpt), **json.loads(args.cfg))
     if args.diag:
         from diag import Recorder
         method = Recorder(method, load_model(args.ckpt))

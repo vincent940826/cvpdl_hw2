@@ -5,6 +5,7 @@ It may update its own state (BN statistics, parameters, memory, ...) as the stre
 """
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class Source:
@@ -69,4 +70,61 @@ class Tent:
         return self.last_logits.argmax(1)
 
 
-METHODS = {"source": Source, "bn_adapt": BNAdapt, "tent": Tent}
+class BlendBN(nn.Module):
+    """BN that normalizes with (1 - alpha) * reference stats + alpha * current-batch stats.
+
+    The reference starts as the source (stored) stats. With update=True the blended stats become the new
+    reference after every batch, i.e. an exponential moving average over the stream with momentum alpha.
+    alpha=0 is `source`, alpha=1 is `bn_adapt`.
+    """
+
+    def __init__(self, bn, alpha, update):
+        super().__init__()
+        self.bn, self.alpha, self.update = bn, alpha, update
+        self.register_buffer("ref_mean", bn.running_mean.detach().clone())
+        self.register_buffer("ref_var", bn.running_var.detach().clone())
+
+    def forward(self, x):
+        a = self.alpha
+        mean = (1 - a) * self.ref_mean + a * x.mean((0, 2, 3))
+        var = (1 - a) * self.ref_var + a * x.var((0, 2, 3), unbiased=False)
+        if self.update:
+            self.ref_mean, self.ref_var = mean.detach(), var.detach()
+        return F.batch_norm(x, mean, var, self.bn.weight, self.bn.bias, False, 0.0, self.bn.eps)
+
+
+def replace_bn(model, make):
+    """Swap every BatchNorm2d in `model` for make(bn)."""
+    for name, m in list(model.named_modules()):
+        if isinstance(m, nn.BatchNorm2d):
+            parent, _, attr = name.rpartition(".")
+            setattr(model.get_submodule(parent), attr, make(m))
+
+
+class BNMix:
+    """Fixed blend of source and current-batch BN stats (Schneider et al., 2020, prior strength)."""
+
+    def __init__(self, model, alpha=0.3):
+        self.model = model.eval()
+        replace_bn(self.model, lambda bn: BlendBN(bn, alpha, update=False))
+
+    @torch.no_grad()
+    def __call__(self, x):
+        self.last_logits = self.model(x)
+        return self.last_logits.argmax(1)
+
+
+class BNEma:
+    """BN stats as an EMA over the stream, starting from the source stats (in the spirit of RoTTA's RBN)."""
+
+    def __init__(self, model, momentum=0.1):
+        self.model = model.eval()
+        replace_bn(self.model, lambda bn: BlendBN(bn, momentum, update=True))
+
+    @torch.no_grad()
+    def __call__(self, x):
+        self.last_logits = self.model(x)
+        return self.last_logits.argmax(1)
+
+
+METHODS = {"source": Source, "bn_adapt": BNAdapt, "tent": Tent, "bn_mix": BNMix, "bn_ema": BNEma}

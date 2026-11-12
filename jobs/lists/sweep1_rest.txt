@@ -1,0 +1,7 @@
+bn_mix|val test|{"alpha": 0.7}|../runs/sweep/bn_mix_a0.7
+bn_ema|val test|{"momentum": 0.01}|../runs/sweep/bn_ema_m0.01
+bn_ema|val test|{"momentum": 0.02}|../runs/sweep/bn_ema_m0.02
+bn_ema|val test|{"momentum": 0.05}|../runs/sweep/bn_ema_m0.05
+bn_ema|val test|{"momentum": 0.1}|../runs/sweep/bn_ema_m0.1
+bn_ema|val test|{"momentum": 0.2}|../runs/sweep/bn_ema_m0.2
+bn_ema|val test|{"momentum": 0.5}|../runs/sweep/bn_ema_m0.5

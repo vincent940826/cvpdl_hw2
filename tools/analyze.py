@@ -312,7 +312,7 @@ def main():
     ap.add_argument("runs", nargs="+", help="run dirs written by run.py (optionally with --diag)")
     ap.add_argument("--seg", type=int, default=11, help="assumed val domain length in batches, for breakdowns")
     ap.add_argument("--bounds", default="", help="explicit val domain starts, e.g. 12,24 (overrides --seg)")
-    ap.add_argument("--fig", default=str(ROOT / "runs" / "analysis"))
+    ap.add_argument("--fig", default=str(ROOT / "runs" / "analysis"), help='figure dir; "" skips figures')
     args = ap.parse_args()
     runs = [load_run(d) for d in args.runs]
     ids = pd.read_csv(ROOT / "data" / "val" / "stream.csv")["id"].tolist()
@@ -327,7 +327,8 @@ def main():
     label_free(runs, "test")
     shift_section(runs, "val", acc=acc, present=present)
     shift_section(runs, "test")
-    figures(runs, y, acc, ncls, segs, Path(args.fig))
+    if args.fig:
+        figures(runs, y, acc, ncls, segs, Path(args.fig))
 
 
 if __name__ == "__main__":
